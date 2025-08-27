@@ -1,69 +1,81 @@
-# ================= main.py =================
-import asyncio
+# ================= INSTALAÇÃO DAS BIBLIOTECAS =================
+!pip install --upgrade pip
+!pip install python-deriv-api==0.1.6 reactivex ta websockets==10.3 nest_asyncio
+
+# ================= IMPORTS =================
 import os
-import json
-import websockets
+import asyncio
+import nest_asyncio
+from deriv_api import DerivAPI
+import pandas as pd
+from ta.trend import EMAIndicator, MACD
+from ta.momentum import RSIIndicator
+from IPython.display import display, HTML
 
-# ================= CONFIGURAÇÃO =================
-DERIV_TOKEN = os.getenv("DERIV_TOKEN")  # Certifique-se de definir no Colab
-APP_ID = os.getenv("DERIV_APP_ID")      # Certifique-se de definir no Colab
-SYMBOL = "frxEURUSD"
-TIMEFRAME = "1m"  # Velas de 1 minuto
+nest_asyncio.apply()
 
-# ================= FUNÇÃO DE CONEXÃO =================
-async def connect_deriv():
-    url = f"wss://ws.binaryws.com/websockets/v3?app_id={APP_ID}&l=EN&brand=deriv&token={DERIV_TOKEN}"
-    print("Tentando conectar ao WebSocket:")
-    print(url)
-    connection = await websockets.connect(url)
-    print("✅ Conexão WebSocket estabelecida com sucesso")
-    return connection
+# ================= VARIÁVEIS DE AMBIENTE =================
+os.environ["DERIV_TOKEN"] = "hq5SmvQjftc2xlv"
+os.environ["DERIV_APP_ID"] = "1089"
 
-# ================= FUNÇÃO DE OUVIR CANDLES =================
-async def listen_candles():
-    conn = await connect_deriv()
-    
-    # Solicitar candles
-    request = {
-        "ticks_history": SYMBOL,
-        "adjust_start_time": 1,
-        "count": 10,
-        "end": "latest",
-        "start": 1,
-        "style": "candles",
-        "granularity": 60  # 1 minuto
-    }
-    await conn.send(json.dumps(request))
+# ================= FUNÇÃO DE GERAÇÃO DE SINAIS =================
+def gerar_sinal(candle, indicadores):
+    """
+    Retorna um dicionário com tipo de sinal e preço
+    """
+    sinal = {"type": "NO_SIGNAL", "price": candle['close']}
+
+    if indicadores['ema_fast'] > indicadores['ema_slow'] and indicadores['rsi'] < 70:
+        sinal["type"] = "BUY"
+    elif indicadores['ema_fast'] < indicadores['ema_slow'] and indicadores['rsi'] > 30:
+        sinal["type"] = "SELL"
+
+    return sinal
+
+def mostrar_sinal_colab(sinal):
+    if sinal["type"] != "NO_SIGNAL":
+        cor = "green" if sinal["type"] == "BUY" else "red"
+        display(HTML(f"<h3 style='color:{cor}'>Sinal: {sinal['type']} | Preço: {sinal['price']}</h3>"))
+
+# ================= FUNÇÃO PRINCIPAL =================
+async def run_bot():
+    api = DerivAPI(app_id=int(os.environ["DERIV_APP_ID"]), token=os.environ["DERIV_TOKEN"])
+    await api.authorize()
+    print("✅ Robô iniciado. Monitorando frxEURUSD 1m...")
+
+    SYMBOL = "frxEURUSD"
+    TIMEFRAME = 60  # Velas de 1 minuto
+    EMA_FAST = 9
+    EMA_SLOW = 21
+    RSI_PERIOD = 14
 
     while True:
         try:
-            response = await conn.recv()
-            data = json.loads(response)
-            # Aqui você pode processar os candles e emitir sinais
-            # Exemplo básico:
-            if "candles" in data:
-                last_candle = data["candles"][-1]
-                close = last_candle["close"]
-                high = last_candle["high"]
-                low = last_candle["low"]
+            # ================= BUSCAR CANDLES =================
+            candles_data = await api.candles(symbol=SYMBOL, interval=TIMEFRAME, count=50)
+            closes = [c['close'] for c in candles_data]
 
-                # Exemplo simples de sinal
-                if close > high * 0.995:
-                    signal = "COMPRA"
-                elif close < low * 1.005:
-                    signal = "VENDA"
-                else:
-                    signal = "NÃO ENTRAR"
+            # ================= CALCULAR INDICADORES =================
+            df = pd.DataFrame({"close": closes})
+            df["ema_fast"] = EMAIndicator(df["close"], EMA_FAST).ema_indicator()
+            df["ema_slow"] = EMAIndicator(df["close"], EMA_SLOW).ema_indicator()
+            df["rsi"] = RSIIndicator(df["close"], RSI_PERIOD).rsi()
 
-                print(f"Sinal: {signal} | Close: {close}")
+            candle_atual = candles_data[-1]
+            indicadores = {
+                "ema_fast": df["ema_fast"].iloc[-1],
+                "ema_slow": df["ema_slow"].iloc[-1],
+                "rsi": df["rsi"].iloc[-1]
+            }
+
+            # ================= GERAR E MOSTRAR SINAL =================
+            sinal = gerar_sinal(candle_atual, indicadores)
+            mostrar_sinal_colab(sinal)
+
         except Exception as e:
             print("❌ Erro ao processar candle:", e)
-            await asyncio.sleep(1)
 
-# ================= FUNÇÃO PRINCIPAL =================
-async def sample_calls():
-    await listen_candles()
+        await asyncio.sleep(1)  # Aguarda 1 segundo antes da próxima vela
 
 # ================= EXECUÇÃO =================
-if __name__ == "__main__":
-    asyncio.run(sample_calls())
+asyncio.run(run_bot())
